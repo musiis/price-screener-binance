@@ -1,6 +1,6 @@
 """
 Real World Assets (RWA) Price Screener
-Monitors Lighter.xyz and Hyperliquid xyz RWA markets against Pyth Network oracle prices
+Monitors Lighter.xyz and Hyperliquid xyz RWA markets using Hyperliquid's real-time oracle
 Sends Telegram alerts when deviation exceeds configured threshold
 """
 
@@ -26,50 +26,40 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# Pyth Network price feed IDs for RWA assets (from Pyth Hermes API)
-PYTH_FEED_IDS = {
-    # Equities (Stocks) - Using standard USD feeds (not PRE/POST/ON)
-    'TSLA': '16dad506d7db8da01c87581c87ca897a012a153557d4d578c3b9c9e1bc0632f1',  # Equity.US.TSLA/USD
-    'AAPL': '49f6b65cb1de6b10eaf75e7c03ca029c306d0357e91b5311b175084a5ad55688',  # Equity.US.AAPL/USD
-    'GOOGL': '88d0800b1649d98e21b8bf9c3f42ab548034d62874ad5d80e1c1b730566d7f61',  # Equity.US.GOOGL/USD
-    'MSFT': '8f98f8267ddddeeb61b4fd11f21dc0c2842c417622b4d685243fa73b5830131f',  # Equity.US.MSFT/USD
-    'NVDA': '61c4ca5b9731a79e285a01e24432d57d89f0ecdd4cd7828196ca8992d5eafef6',  # Equity.US.NVDA/USD
-    'AMZN': '82c59e36a8e0247e15283748d6cd51f5fa1019d73fbf3ab6d927e17d9e357a7f',  # Equity.US.AMZN/USD
-    'META': '399f1e8f1c4a517859963b56f104727a7a3c7f0f8fee56d34fa1f72e5a4b78ef',  # Equity.US.META/USD
-    'PLTR': '3a4c922ec7e8cd86a6fa4005827e723a134a16f4ffe836eac91e7820c61f75a1',  # Equity.US.PLTR/USD
-    'COIN': 'fee33f2a978bf32dd6b662b65ba8083c6773b494f8401194ec1870c640860245',  # Equity.US.COIN/USD
-    'HOOD': '52ecf79ab14d988ca24fbd282a7cb91d41d36cb76aa3c9075a3eabce9ff63e2f',  # Equity.US.HOOD/USD
-    'MSTR': 'd8b856d7e17c467877d2d947f27b832db0d65b362ddb6f728797d46b0a8b54c0',  # Equity.US.MSTR/USD
-    'AMD': '7178689d88cdd76574b64438fc57f4e57efaf0bf5f9593ee19c10e46a3c5b5cf',  # Equity.US.AMD/USD
-
+# Lighter symbol -> Hyperliquid xyz symbol mapping
+# Used to find matching oracle prices from Hyperliquid
+LIGHTER_TO_HYPERLIQUID = {
+    # Equities - direct match
+    'TSLA': 'TSLA',
+    'AAPL': 'AAPL',
+    'GOOGL': 'GOOGL',
+    'MSFT': 'MSFT',
+    'NVDA': 'NVDA',
+    'AMZN': 'AMZN',
+    'META': 'META',
+    'PLTR': 'PLTR',
+    'COIN': 'COIN',
+    'HOOD': 'HOOD',
+    'MSTR': 'MSTR',
+    'AMD': 'AMD',
     # Commodities
-    'XAU': '765d2ba906dbc32ca17cc11f5310a89e9ee1f6420508c63861f2f8ba4ee34bb2',  # Metal.XAU/USD (Gold)
-    'XAG': 'f2fb02c32b055c805e7238d628e5e9dadef274376114eb1f012337cabe93871e',  # Metal.XAG/USD (Silver)
-    'PAXG': '765d2ba906dbc32ca17cc11f5310a89e9ee1f6420508c63861f2f8ba4ee34bb2',  # Tokenized Gold (use XAU)
-
+    'XAU': 'GOLD',
+    'XAG': 'SILVER',
+    'PAXG': 'GOLD',
     # Forex
-    'EURUSD': 'a995d00bb36a63cef7fd2c287dc105fc8f3d93779f062f09551b0af3e81ec30b',  # FX.EUR/USD
-    'USDJPY': 'ef2c98c804ba503c6a707e38be4dfbb16683775f195b091252bf24693042fd52',  # FX.USD/JPY
-    'GBPUSD': '84c2dde9633d93d1bcad84e7dc41c9d56578b7ec52fabedc1f335d673df0a7c1',  # FX.GBP/USD
-    'AUDUSD': '67a6f93030420c1c9e3fe37c1ab6b77966af82f995944a9fefce357a22854a80',  # FX.AUD/USD
-    'NZDUSD': '92eea8ba1b00078cdc2ef6f64f091f262e8c7d0576ee4677572f314ebfafa4c7',  # FX.NZD/USD
-    'USDCAD': '3112b03a41c910ed446852aacf67118cb1bec67b2cd0b9a214c58cc0eaa2ecca',  # FX.USD/CAD
-    'USDCHF': '0b1e3297e69f162877b577b0d6a47a0d63b2392bc8499e6540da4187a63e28f8',  # FX.USD/CHF
-    'USDKRW': 'e539120487c29b4defdf9a53d337316ea022a2688978a468f9efd847201be7e3',  # FX.USD/KRW
-}
-
-# Symbol mapping: Lighter symbol -> Hyperliquid xyz symbol
-SYMBOL_MAPPING = {
     'EURUSD': 'EUR',
     'USDJPY': 'JPY',
     'GBPUSD': 'GBP',
-    'XAU': 'GOLD',
-    'XAG': 'SILVER',
+    'AUDUSD': 'AUD',
+    'NZDUSD': 'NZD',
+    'USDCAD': 'CAD',
+    'USDCHF': 'CHF',
 }
 
 
+
 class RWAPriceScreener:
-    """Monitor RWA markets on Lighter.xyz and Hyperliquid xyz against Pyth oracle"""
+    """Monitor RWA markets on Lighter.xyz and Hyperliquid xyz using Hyperliquid oracle"""
 
     def __init__(self):
         self.deviation_threshold = float(os.getenv('DEVIATION_THRESHOLD_PERCENT', '0.5'))
@@ -98,9 +88,6 @@ class RWAPriceScreener:
         # Lighter API client
         self.client = lighter.ApiClient()
         self.order_api = lighter.OrderApi(self.client)
-
-        # Pyth Hermes API base URL
-        self.pyth_base_url = 'https://hermes.pyth.network'
 
     async def send_alert(self, market_key: str, message: str):
         """Send alert via Telegram and/or console"""
@@ -172,40 +159,6 @@ class RWAPriceScreener:
             except TelegramError as e:
                 logger.error(f"Failed to send Telegram message: {e}")
 
-    def fetch_pyth_oracle_prices(self) -> Dict[str, float]:
-        """Fetch oracle prices from Pyth Network Hermes API (FREE)"""
-        try:
-            # Get all feed IDs
-            feed_ids = list(PYTH_FEED_IDS.values())
-
-            url = f'{self.pyth_base_url}/api/latest_price_feeds'
-            params = {'ids[]': feed_ids}
-
-            response = requests.get(url, params=params, timeout=10)
-            response.raise_for_status()
-
-            data = response.json()
-
-            prices = {}
-            for symbol, feed_id in PYTH_FEED_IDS.items():
-                # Find matching feed in response
-                for item in data:
-                    if item['id'] == feed_id:
-                        price_data = item['price']
-                        price_raw = int(price_data['price'])
-                        expo = int(price_data['expo'])
-                        price = price_raw * (10 ** expo)
-
-                        if price > 0:
-                            prices[symbol] = price
-                        break
-
-            logger.info(f"Fetched {len(prices)} oracle prices from Pyth Network")
-            return prices
-
-        except Exception as e:
-            logger.error(f"Error fetching Pyth oracle prices: {e}")
-            return {}
 
     async def fetch_lighter_rwa_prices(self) -> Dict[str, dict]:
         """Fetch RWA prices from Lighter.xyz"""
@@ -219,8 +172,8 @@ class RWAPriceScreener:
 
             prices = {}
 
-            # RWA symbols to look for
-            rwa_symbols = set(PYTH_FEED_IDS.keys())
+            # RWA symbols to look for (only those that have Hyperliquid mapping)
+            rwa_symbols = set(LIGHTER_TO_HYPERLIQUID.keys())
 
             for stat in order_book_stats:
                 if isinstance(stat, dict):
@@ -317,7 +270,7 @@ class RWAPriceScreener:
         return ((price - oracle_price) / oracle_price) * 100
 
     def check_lighter_market(self, symbol: str, lighter_data: dict, oracle_price: float):
-        """Check a single Lighter market for price deviation"""
+        """Check a single Lighter market for price deviation using Hyperliquid oracle"""
         try:
             lighter_price = lighter_data.get('last_trade_price')
             if not lighter_price:
@@ -327,7 +280,7 @@ class RWAPriceScreener:
             deviation = self.calculate_deviation(lighter_price, oracle_price)
 
             logger.debug(
-                f"Lighter {symbol}: Price=${lighter_price:.4f}, Oracle=${oracle_price:.4f}, "
+                f"Lighter {symbol}: Price=${lighter_price:.4f}, HL Oracle=${oracle_price:.4f}, "
                 f"Deviation={deviation:.2f}%"
             )
 
@@ -341,7 +294,7 @@ class RWAPriceScreener:
                 message = (
                     f"{emoji} *LIGHTER - {symbol}*\n"
                     f"Last Trade: `${lighter_price:.4f}`\n"
-                    f"Pyth Oracle: `${oracle_price:.4f}`\n"
+                    f"HL Oracle: `${oracle_price:.4f}`\n"
                     f"Deviation: *{direction}{abs(deviation):.2f}%*\n"
                     f"Threshold: {self.deviation_threshold}%\n"
                     f"🔗 https://app.lighter.xyz/trade/{symbol}"
@@ -429,42 +382,50 @@ class RWAPriceScreener:
             return None
 
     async def scan_all_markets(self):
-        """Scan all RWA markets for price deviations"""
-        # Fetch Pyth oracle prices (reference prices)
-        pyth_prices = self.fetch_pyth_oracle_prices()
-
-        if not pyth_prices:
-            logger.warning("No Pyth oracle prices available, skipping scan")
-            return
-
-        # Fetch exchange prices
-        lighter_prices = await self.fetch_lighter_rwa_prices()
+        """Scan all RWA markets for price deviations using Hyperliquid oracle"""
+        # Fetch Hyperliquid xyz prices (includes oracle prices)
         hyperliquid_prices = self.fetch_hyperliquid_xyz_prices()
 
-        if not lighter_prices and not hyperliquid_prices:
-            logger.warning("No exchange prices available, skipping scan")
+        if not hyperliquid_prices:
+            logger.warning("No Hyperliquid oracle prices available, skipping scan")
             return
+
+        # Build oracle price lookup from Hyperliquid data
+        hl_oracle_prices = {}
+        for hl_symbol, hl_data in hyperliquid_prices.items():
+            oracle_price = hl_data.get('oracle_price')
+            if oracle_price:
+                hl_oracle_prices[hl_symbol] = oracle_price
+
+        # Fetch Lighter prices
+        lighter_prices = await self.fetch_lighter_rwa_prices()
 
         logger.info(
             f"Scanning {len(lighter_prices)} Lighter + {len(hyperliquid_prices)} Hyperliquid xyz markets "
-            f"against {len(pyth_prices)} Pyth oracle prices..."
+            f"using Hyperliquid oracle..."
         )
 
         alerts = []
 
-        # Check Lighter markets
+        # Check Lighter markets using Hyperliquid oracle
         for symbol, lighter_data in lighter_prices.items():
-            # Get Pyth oracle price for this symbol
-            oracle_price = pyth_prices.get(symbol)
+            # Map Lighter symbol to Hyperliquid symbol
+            hl_symbol = LIGHTER_TO_HYPERLIQUID.get(symbol)
+            if not hl_symbol:
+                logger.debug(f"No Hyperliquid mapping for Lighter symbol {symbol}")
+                continue
+
+            # Get Hyperliquid oracle price for this symbol
+            oracle_price = hl_oracle_prices.get(hl_symbol)
             if not oracle_price:
-                logger.debug(f"No Pyth oracle price for {symbol}")
+                logger.debug(f"No Hyperliquid oracle price for {symbol} (HL: {hl_symbol})")
                 continue
 
             result = self.check_lighter_market(symbol, lighter_data, oracle_price)
             if result:
                 alerts.append(result)
 
-        # Check Hyperliquid xyz markets (uses Hyperliquid's own oracle, not Pyth)
+        # Check Hyperliquid xyz markets (uses Hyperliquid's own oracle)
         for symbol, hl_data in hyperliquid_prices.items():
             result = self.check_hyperliquid_xyz_market(symbol, hl_data)
             if result:
@@ -483,10 +444,10 @@ class RWAPriceScreener:
     async def run(self):
         """Main loop - continuously monitor markets"""
         logger.info(f"Starting RWA Price Screener")
-        logger.info(f"Monitoring: Lighter.xyz + Hyperliquid xyz vs Pyth Network Oracle")
+        logger.info(f"Monitoring: Lighter.xyz + Hyperliquid xyz")
+        logger.info(f"Oracle: Hyperliquid (real-time)")
         logger.info(f"Deviation threshold: {self.deviation_threshold}%")
         logger.info(f"Poll interval: {self.poll_interval} seconds")
-        logger.info(f"Using Pyth Hermes API (FREE) for oracle prices")
 
         try:
             # Continuous monitoring loop

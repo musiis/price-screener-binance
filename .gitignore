@@ -1,0 +1,12 @@
+# Environment variables (contains secrets)
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Claude Code settings
+.claude/
+
+# Windows reserved name (problematic file)
+nul

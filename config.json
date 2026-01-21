@@ -1,0 +1,10 @@
+{
+    "symbol_blacklist": [
+        "AI", "AI16Z", "AIXBT", "BNT", "FTM", "OMNI", "ORBS",
+        "STRAX", "RDNT", "STG", "PIXEL", "NTRN"
+    ],
+    "custom_thresholds": {
+        "FOGO": 15.0,
+        "LIT": 5.0
+    }
+}

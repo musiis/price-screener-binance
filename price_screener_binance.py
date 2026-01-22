@@ -69,6 +69,11 @@ class BinancePriceScreener:
         self.last_alert: Dict[str, float] = {}
         self.alert_cooldown = 300  # 5 minutes between alerts for same pair
 
+        # Track consecutive alerts for auto-blacklisting
+        self.consecutive_alerts: Dict[str, int] = {}
+        self.blacklisted: Dict[str, float] = {}  # market_key -> blacklist timestamp
+        self.blacklist_duration = 86400  # 24 hours in seconds
+
         # Lighter API client
         self.client = lighter.ApiClient()
         self.order_api = lighter.OrderApi(self.client)
@@ -309,12 +314,56 @@ class BinancePriceScreener:
 
     async def send_alert(self, market_id: int, message: str):
         """Send alert via Telegram and/or console"""
-        logger.warning(f"ALERT [Market {market_id}]: {message}")
-
-        # Check cooldown
         current_time = asyncio.get_event_loop().time()
         alert_key = str(market_id)
 
+        # Check if blacklisted
+        if alert_key in self.blacklisted:
+            time_since_blacklist = current_time - self.blacklisted[alert_key]
+            if time_since_blacklist < self.blacklist_duration:
+                remaining_hours = (self.blacklist_duration - time_since_blacklist) / 3600
+                logger.debug(
+                    f"Market {alert_key} is blacklisted for {remaining_hours:.1f} more hours"
+                )
+                return
+            else:
+                logger.info(f"Blacklist expired for {alert_key}, re-enabling alerts")
+                del self.blacklisted[alert_key]
+                self.consecutive_alerts[alert_key] = 0
+
+        logger.warning(f"ALERT [Market {market_id}]: {message}")
+
+        # Track consecutive alerts (regardless of cooldown)
+        self.consecutive_alerts[alert_key] = self.consecutive_alerts.get(alert_key, 0) + 1
+        logger.info(
+            f"Consecutive alerts for {alert_key}: {self.consecutive_alerts[alert_key]}/2"
+        )
+
+        # If we've hit 2 consecutive alerts, blacklist for 24h
+        if self.consecutive_alerts[alert_key] >= 2:
+            self.blacklisted[alert_key] = current_time
+            logger.warning(
+                f"Market {alert_key} blacklisted for 24h due to 2 consecutive alerts"
+            )
+            if self.bot:
+                try:
+                    blacklist_msg = (
+                        f"⛔ *AUTO-BLACKLISTED*\n\n"
+                        f"Market: `{alert_key}`\n"
+                        f"Reason: 2 consecutive alerts\n"
+                        f"Duration: 24 hours\n\n"
+                        f"This market will be ignored until blacklist expires."
+                    )
+                    await self.bot.send_message(
+                        chat_id=self.telegram_chat_id,
+                        text=blacklist_msg,
+                        parse_mode='Markdown'
+                    )
+                except TelegramError as e:
+                    logger.error(f"Failed to send blacklist notification: {e}")
+            return
+
+        # Check cooldown
         if alert_key in self.last_alert:
             if current_time - self.last_alert[alert_key] < self.alert_cooldown:
                 logger.debug(f"Alert cooldown active for {market_id}, skipping Telegram notification")

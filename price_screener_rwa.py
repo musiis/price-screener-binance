@@ -6,9 +6,10 @@ Sends Telegram alerts when deviation exceeds configured threshold
 
 import asyncio
 import os
+import json
 import logging
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
 from dotenv import load_dotenv
 import lighter
 import requests
@@ -56,6 +57,27 @@ LIGHTER_TO_HYPERLIQUID = {
     'USDCHF': 'CHF',
 }
 
+
+
+# Load config from JSON file
+def load_config() -> tuple[Set[str], Dict[str, float]]:
+    """Load blacklist and custom thresholds from config.json"""
+    config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        blacklist = set(config.get('symbol_blacklist', []))
+        thresholds = config.get('custom_thresholds', {})
+        logger.info(f"Loaded config: {len(blacklist)} blacklisted, {len(thresholds)} custom thresholds")
+        return blacklist, thresholds
+    except FileNotFoundError:
+        logger.warning(f"Config file not found at {config_path}, using empty defaults")
+        return set(), {}
+    except json.JSONDecodeError as e:
+        logger.error(f"Error parsing config.json: {e}")
+        return set(), {}
+
+SYMBOL_BLACKLIST, CUSTOM_THRESHOLDS = load_config()
 
 
 class RWAPriceScreener:
@@ -112,6 +134,36 @@ class RWAPriceScreener:
 
         logger.warning(f"ALERT [{market_key}]: {message}")
 
+        # Track consecutive alerts (regardless of cooldown)
+        self.consecutive_alerts[market_key] = self.consecutive_alerts.get(market_key, 0) + 1
+        logger.info(
+            f"Consecutive alerts for {market_key}: {self.consecutive_alerts[market_key]}/2"
+        )
+
+        # If we've hit 2 consecutive alerts, blacklist for 24h
+        if self.consecutive_alerts[market_key] >= 2:
+            self.blacklisted[market_key] = current_time
+            logger.warning(
+                f"Market {market_key} blacklisted for 24h due to 2 consecutive alerts"
+            )
+            if self.bot:
+                try:
+                    blacklist_msg = (
+                        f"⛔ *AUTO-BLACKLISTED*\n\n"
+                        f"Market: `{market_key}`\n"
+                        f"Reason: 2 consecutive alerts\n"
+                        f"Duration: 24 hours\n\n"
+                        f"This market will be ignored until blacklist expires."
+                    )
+                    await self.bot.send_message(
+                        chat_id=self.telegram_chat_id,
+                        text=blacklist_msg,
+                        parse_mode='Markdown'
+                    )
+                except TelegramError as e:
+                    logger.error(f"Failed to send blacklist notification: {e}")
+            return
+
         # Check cooldown
         if market_key in self.last_alert:
             if current_time - self.last_alert[market_key] < self.alert_cooldown:
@@ -129,33 +181,6 @@ class RWAPriceScreener:
                 )
                 self.last_alert[market_key] = current_time
                 logger.info(f"Telegram alert sent for {market_key}")
-
-                # Track consecutive alerts
-                self.consecutive_alerts[market_key] = self.consecutive_alerts.get(market_key, 0) + 1
-                logger.info(
-                    f"Consecutive alerts for {market_key}: {self.consecutive_alerts[market_key]}/2"
-                )
-
-                # If we've hit 2 consecutive alerts, blacklist for 24h
-                if self.consecutive_alerts[market_key] >= 2:
-                    self.blacklisted[market_key] = current_time
-                    logger.warning(
-                        f"Market {market_key} blacklisted for 24h due to consecutive false alerts"
-                    )
-                    # Send notification about blacklisting
-                    blacklist_msg = (
-                        f"⛔ *AUTO-BLACKLISTED*\n\n"
-                        f"Market: `{market_key}`\n"
-                        f"Reason: 2 consecutive alerts\n"
-                        f"Duration: 24 hours\n\n"
-                        f"This market will be ignored until blacklist expires."
-                    )
-                    await self.bot.send_message(
-                        chat_id=self.telegram_chat_id,
-                        text=blacklist_msg,
-                        parse_mode='Markdown'
-                    )
-
             except TelegramError as e:
                 logger.error(f"Failed to send Telegram message: {e}")
 
@@ -272,6 +297,11 @@ class RWAPriceScreener:
     def check_lighter_market(self, symbol: str, lighter_data: dict, oracle_price: float):
         """Check a single Lighter market for price deviation using Hyperliquid oracle"""
         try:
+            # Skip blacklisted symbols
+            if symbol in SYMBOL_BLACKLIST:
+                logger.debug(f"Skipping {symbol}: in blacklist")
+                return None
+
             lighter_price = lighter_data.get('last_trade_price')
             if not lighter_price:
                 return None
@@ -286,8 +316,11 @@ class RWAPriceScreener:
 
             market_key = f"LT-{symbol}"
 
+            # Get threshold (custom or default)
+            threshold = CUSTOM_THRESHOLDS.get(symbol, self.deviation_threshold)
+
             # Alert if deviation exceeds threshold
-            if abs(deviation) >= self.deviation_threshold:
+            if abs(deviation) >= threshold:
                 direction = "↑" if deviation > 0 else "↓"
                 emoji = "📈" if deviation > 0 else "📉"
 
@@ -296,16 +329,10 @@ class RWAPriceScreener:
                     f"Last Trade: `${lighter_price:.4f}`\n"
                     f"HL Oracle: `${oracle_price:.4f}`\n"
                     f"Deviation: *{direction}{abs(deviation):.2f}%*\n"
-                    f"Threshold: {self.deviation_threshold}%\n"
+                    f"Threshold: {threshold}%\n"
                     f"🔗 https://app.lighter.xyz/trade/{symbol}"
                 )
                 return (market_key, message)
-            else:
-                # Deviation is below threshold - reset consecutive alerts counter
-                if market_key in self.consecutive_alerts:
-                    logger.debug(f"Deviation normalized for {market_key}, resetting consecutive alerts")
-                    self.consecutive_alerts[market_key] = 0
-
             return None
 
         except Exception as e:
@@ -315,6 +342,11 @@ class RWAPriceScreener:
     def check_hyperliquid_xyz_market(self, symbol: str, hl_data: dict):
         """Check a single Hyperliquid xyz market for bid/ask deviation from oracle"""
         try:
+            # Skip blacklisted symbols
+            if symbol in SYMBOL_BLACKLIST:
+                logger.debug(f"Skipping {symbol}: in blacklist")
+                return None
+
             oracle_price = hl_data.get('oracle_price')
             best_bid = hl_data.get('best_bid')
             best_ask = hl_data.get('best_ask')
@@ -336,11 +368,11 @@ class RWAPriceScreener:
             ask_key = f"HL-xyz-{symbol}-ASK"
             alerts = []
 
-            # RWA threshold: 2.5%
-            rwa_threshold = 2.5
+            # Get threshold (custom or default)
+            threshold = CUSTOM_THRESHOLDS.get(symbol, self.deviation_threshold)
 
             # Alert if best bid deviates from oracle (sell opportunity)
-            if abs(bid_deviation) >= rwa_threshold:
+            if abs(bid_deviation) >= threshold:
                 direction = "↑" if bid_deviation > 0 else "↓"
                 emoji = "📈" if bid_deviation > 0 else "📉"
                 message = (
@@ -348,17 +380,13 @@ class RWAPriceScreener:
                     f"Best Bid: `${best_bid:.4f}`\n"
                     f"Oracle: `${oracle_price:.4f}`\n"
                     f"Deviation: *{direction}{abs(bid_deviation):.2f}%*\n"
-                    f"Threshold: {rwa_threshold}%\n"
+                    f"Threshold: {threshold}%\n"
                     f"🔗 https://app.hyperliquid.xyz/trade/xyz:{symbol}"
                 )
                 alerts.append((bid_key, message))
-            else:
-                if bid_key in self.consecutive_alerts:
-                    logger.debug(f"Deviation normalized for {bid_key}, resetting consecutive alerts")
-                    self.consecutive_alerts[bid_key] = 0
 
             # Alert if best ask deviates from oracle (buy opportunity)
-            if abs(ask_deviation) >= rwa_threshold:
+            if abs(ask_deviation) >= threshold:
                 direction = "↑" if ask_deviation > 0 else "↓"
                 emoji = "📈" if ask_deviation > 0 else "📉"
                 message = (
@@ -366,14 +394,10 @@ class RWAPriceScreener:
                     f"Best Ask: `${best_ask:.4f}`\n"
                     f"Oracle: `${oracle_price:.4f}`\n"
                     f"Deviation: *{direction}{abs(ask_deviation):.2f}%*\n"
-                    f"Threshold: {rwa_threshold}%\n"
+                    f"Threshold: {threshold}%\n"
                     f"🔗 https://app.hyperliquid.xyz/trade/xyz:{symbol}"
                 )
                 alerts.append((ask_key, message))
-            else:
-                if ask_key in self.consecutive_alerts:
-                    logger.debug(f"Deviation normalized for {ask_key}, resetting consecutive alerts")
-                    self.consecutive_alerts[ask_key] = 0
 
             return alerts if alerts else None
 

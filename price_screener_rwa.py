@@ -60,32 +60,34 @@ LIGHTER_TO_HYPERLIQUID = {
 
 
 # Load config from JSON file
-def load_config() -> tuple[Set[str], Dict[str, float]]:
-    """Load blacklist and custom thresholds from config.json"""
+def load_config() -> dict:
+    """Load all settings from config.json"""
     config_path = os.path.join(os.path.dirname(__file__), 'config.json')
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
-        blacklist = set(config.get('symbol_blacklist', []))
-        thresholds = config.get('custom_thresholds', {})
-        logger.info(f"Loaded config: {len(blacklist)} blacklisted, {len(thresholds)} custom thresholds")
-        return blacklist, thresholds
+        logger.info(f"Loaded config: threshold={config.get('default_threshold', 0.5)}%, "
+                   f"poll={config.get('poll_interval', 60)}s, "
+                   f"{len(config.get('symbol_blacklist', []))} blacklisted")
+        return config
     except FileNotFoundError:
-        logger.warning(f"Config file not found at {config_path}, using empty defaults")
-        return set(), {}
+        logger.warning(f"Config file not found at {config_path}, using defaults")
+        return {}
     except json.JSONDecodeError as e:
         logger.error(f"Error parsing config.json: {e}")
-        return set(), {}
+        return {}
 
-SYMBOL_BLACKLIST, CUSTOM_THRESHOLDS = load_config()
+CONFIG = load_config()
+SYMBOL_BLACKLIST = set(CONFIG.get('symbol_blacklist', []))
+CUSTOM_THRESHOLDS = CONFIG.get('custom_thresholds', {})
 
 
 class RWAPriceScreener:
     """Monitor RWA markets on Lighter.xyz and Hyperliquid xyz using Hyperliquid oracle"""
 
     def __init__(self):
-        self.deviation_threshold = float(os.getenv('DEVIATION_THRESHOLD_PERCENT', '0.5'))
-        self.poll_interval = int(os.getenv('POLL_INTERVAL', '60'))
+        self.deviation_threshold = float(CONFIG.get('default_threshold', 0.5))
+        self.poll_interval = int(CONFIG.get('poll_interval', 60))
 
         # Telegram configuration
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')

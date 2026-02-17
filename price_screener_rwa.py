@@ -109,6 +109,9 @@ class RWAPriceScreener:
         self.blacklisted: Dict[str, float] = {}  # market_key -> blacklist timestamp
         self.blacklist_duration = 86400  # 24 hours in seconds
 
+        # 2-poll confirmation: alert only if deviation persists across consecutive scans
+        self.pending_alerts: Dict[str, str] = {}  # alert_key -> message from previous scan
+
         # Lighter API client
         self.client = lighter.ApiClient()
         self.order_api = lighter.OrderApi(self.client)
@@ -458,12 +461,26 @@ class RWAPriceScreener:
                 # Result is a list of alerts
                 alerts.extend(result)
 
-        # Send all alerts
-        for alert_key, message in alerts:
+        # 2-poll confirmation: only send alerts that were also detected in the previous scan
+        current_alerts = {key: message for key, message in alerts}
+        confirmed = []
+        for alert_key, message in current_alerts.items():
+            if alert_key in self.pending_alerts:
+                confirmed.append((alert_key, message))
+            else:
+                logger.info(f"Pending confirmation: {alert_key} (will alert if persists next scan)")
+
+        # Send only confirmed alerts
+        for alert_key, message in confirmed:
             await self.send_alert(alert_key, message)
 
-        if alerts:
-            logger.info(f"Scan complete - {len(alerts)} alerts triggered")
+        # Update pending for next scan
+        self.pending_alerts = current_alerts
+
+        if confirmed:
+            logger.info(f"Scan complete - {len(confirmed)} confirmed alerts sent ({len(current_alerts)} detected)")
+        elif current_alerts:
+            logger.info(f"Scan complete - {len(current_alerts)} pending confirmation, 0 confirmed")
         else:
             logger.info("Scan complete - no deviations detected")
 

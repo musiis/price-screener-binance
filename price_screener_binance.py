@@ -91,6 +91,9 @@ class BinancePriceScreener:
         # We'll populate this dynamically by matching symbols
         self.market_to_binance: Dict[int, str] = {}
 
+        # Symbol -> market_id mapping for recent_trades validation
+        self.symbol_to_market_id: Dict[str, int] = {}
+
     def get_binance_symbol(self, lighter_symbol: str) -> Optional[str]:
         """Convert Lighter symbol to Binance futures symbol"""
         # Lighter symbols are like "BTC", "ETH", "SOL", "AAVE", etc.
@@ -245,6 +248,44 @@ class BinancePriceScreener:
             import traceback
             logger.error(traceback.format_exc())
             return {}
+
+    async def validate_lighter_price(self, symbol: str, expected_price: float) -> bool:
+        """Validate Lighter last_trade_price by checking recent_trades endpoint.
+        Returns True if price is confirmed, False if it looks wrong or can't be validated."""
+        market_id = self.symbol_to_market_id.get(symbol)
+        if market_id is None:
+            logger.warning(f"No market_id for {symbol}, blocking alert (can't validate)")
+            return False
+
+        try:
+            trades = await self.order_api.recent_trades(market_id=market_id, limit=5)
+            if not hasattr(trades, 'trades') or not trades.trades:
+                logger.warning(f"No recent trades for {symbol}, blocking alert")
+                return False
+
+            latest_trade = trades.trades[0]
+            if isinstance(latest_trade, dict):
+                real_price = float(latest_trade.get('price', 0))
+            else:
+                real_price = float(getattr(latest_trade, 'price', 0))
+
+            if real_price <= 0:
+                return False
+
+            diff_pct = abs(expected_price - real_price) / real_price * 100
+            if diff_pct > 1.0:
+                logger.warning(
+                    f"REJECTED {symbol}: exchange_stats=${expected_price:.6f} vs "
+                    f"recent_trades=${real_price:.6f} (diff {diff_pct:.2f}%) - stale data"
+                )
+                return False
+
+            logger.info(f"VALIDATED {symbol}: exchange_stats=${expected_price:.6f} matches recent_trades=${real_price:.6f}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error validating {symbol} price: {e}")
+            return False
 
     async def fetch_hyperliquid_prices(self) -> Dict[str, dict]:
         """Fetch bid/ask prices for ALL Hyperliquid perp markets using metaAndAssetCtxs endpoint"""
@@ -588,19 +629,55 @@ class BinancePriceScreener:
             else:
                 logger.info(f"Pending confirmation: {alert_key} (will alert if persists next scan)")
 
-        # Send only confirmed alerts
+        # Validate confirmed Lighter alerts with recent_trades before sending
+        validated = []
         for alert_key, message in confirmed:
+            if alert_key.startswith("LT-"):
+                symbol = alert_key[3:]  # "LT-COIN" -> "COIN"
+                price = lighter_prices.get(symbol, {}).get('last_trade_price')
+                if price and not await self.validate_lighter_price(symbol, price):
+                    continue  # rejected by recent_trades validation
+            validated.append((alert_key, message))
+
+        # Send only validated alerts
+        for alert_key, message in validated:
             await self.send_alert(alert_key, message)
 
         # Update pending for next scan
         self.pending_alerts = current_alerts
 
-        if confirmed:
-            logger.info(f"Scan complete - {len(confirmed)} confirmed alerts sent ({len(current_alerts)} detected)")
+        if validated:
+            logger.info(f"Scan complete - {len(validated)} validated alerts sent ({len(current_alerts)} detected)")
         elif current_alerts:
-            logger.info(f"Scan complete - {len(current_alerts)} pending confirmation, 0 confirmed")
+            logger.info(f"Scan complete - {len(current_alerts)} pending confirmation, 0 sent")
         else:
             logger.info("Scan complete - no deviations detected")
+
+    async def _build_market_id_mapping(self):
+        """Fetch order_books once to build symbol -> market_id mapping for recent_trades validation"""
+        try:
+            orderbooks_response = await self.order_api.order_books()
+            if hasattr(orderbooks_response, 'order_books'):
+                obs = orderbooks_response.order_books
+            elif hasattr(orderbooks_response, 'data'):
+                obs = orderbooks_response.data
+            else:
+                obs = orderbooks_response
+
+            if isinstance(obs, list):
+                for ob in obs:
+                    if isinstance(ob, dict):
+                        symbol = ob.get('symbol', '')
+                        market_id = ob.get('market_id')
+                    else:
+                        symbol = getattr(ob, 'symbol', '')
+                        market_id = getattr(ob, 'market_id', None)
+                    if symbol and market_id is not None:
+                        self.symbol_to_market_id[symbol] = int(market_id)
+
+            logger.info(f"Built market_id mapping for {len(self.symbol_to_market_id)} symbols")
+        except Exception as e:
+            logger.error(f"Error building market_id mapping: {e}")
 
     async def run(self):
         """Main loop - continuously monitor markets"""
@@ -608,7 +685,9 @@ class BinancePriceScreener:
         logger.info(f"Monitoring: Lighter.xyz + Hyperliquid vs Binance")
         logger.info(f"Deviation threshold: {self.deviation_threshold}%")
         logger.info(f"Poll interval: {self.poll_interval} seconds")
-        logger.info(f"Using bulk endpoints - only 3 API calls per scan (1 Binance + 1 Lighter + 1 Hyperliquid)!")
+
+        # Build symbol -> market_id mapping once at startup
+        await self._build_market_id_mapping()
 
         try:
             # Continuous monitoring loop
